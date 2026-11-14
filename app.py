@@ -26,7 +26,7 @@ st.set_page_config(
 st.title("🐾 Multi-Class Animal Image Classification")
 st.markdown(
     """
-    Upload an image of an animal to predict its category using a custom-trained **Convolutional Neural Network (CNN)**.
+    Upload an image of an animal to predict its category using **MobileNetV2 Transfer Learning (CNN)**.
     
     **Supported Animals:** `Butterfly`, `Cat`, `Dog`, `Elephant`, `Horse`.
     """

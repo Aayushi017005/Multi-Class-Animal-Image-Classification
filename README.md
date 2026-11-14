@@ -1,4 +1,4 @@
-# Multi-Class Animal Image Classification
+# Multi-Class Animal Image Classification (MobileNetV2 Transfer Learning)
 
 A complete, self-contained Python machine learning project designed for academic submission and web deployment that classifies animal images into **5 categories**:
 - 🐱 **Cat**
@@ -7,14 +7,15 @@ A complete, self-contained Python machine learning project designed for academic
 - 🐴 **Horse**
 - 🦋 **Butterfly**
 
-The project includes a custom Convolutional Neural Network (CNN) implemented from scratch using TensorFlow/Keras (strictly without pre-trained transfer learning architectures), image preprocessing, in-model data augmentation, early stopping regularization, evaluation metrics (accuracy, loss, confusion matrix, precision, recall, F1-score), a CLI prediction script, and an interactive Streamlit web application.
+The project employs **MobileNetV2 Transfer Learning** using pre-trained ImageNet weights as a deep convolutional feature extractor, coupled with in-model data augmentation, normalization, early stopping, fine-tuning, objective scikit-learn evaluation metrics (accuracy, loss, confusion matrix, classification report), a CLI prediction tool, and an interactive Streamlit web application.
 
 ---
 
 ## 🛠️ Technology Stack
 
 - **Language:** Python 3.10+
-- **Deep Learning Framework:** TensorFlow & Keras
+- **Deep Learning & CNN:** TensorFlow & Keras
+- **Pre-trained Architecture:** MobileNetV2 (ImageNet weights)
 - **Computer Vision & Array Operations:** Pillow (PIL), NumPy
 - **Machine Learning Evaluation:** Scikit-learn
 - **Data Visualization:** Matplotlib
@@ -32,13 +33,13 @@ Multi-Class Animal Image Classification/
 │   ├── val/                    # 15 images/class (75 images)
 │   └── test/                   # 15 images/class (75 images)
 │
-├── train.py                    # CNN model definition, training, and evaluation
+├── train.py                    # MobileNetV2 transfer learning training & evaluation
 ├── predict.py                  # Prediction inference function and CLI tool
 ├── app.py                      # Interactive Streamlit web interface
 ├── download_data.py            # Automated dataset downloader & deduplicator
 ├── requirements.txt            # Python dependencies
 ├── class_names.json            # Generated class mapping metadata
-├── animal_classifier.keras     # Saved trained CNN model (~14.8 MB)
+├── animal_classifier.keras     # Saved trained MobileNetV2 model (~10 MB)
 ├── training_history.png        # Training vs Validation accuracy & loss curves
 ├── confusion_matrix.png        # Confusion matrix heatmap on test set
 ├── .gitignore                  # Git ignore rules (excludes cache, venvs, etc.)
@@ -50,20 +51,9 @@ Multi-Class Animal Image Classification/
 ## 📊 Dataset & Separation
 
 The dataset is partitioned into three strictly separated splits:
-1. **Training Set (`dataset/train/`):** 350 images (70 per category) used to fit network weights.
-2. **Validation Set (`dataset/val/`):** 75 images (15 per category) monitored during training for EarlyStopping.
-3. **Testing Set (`dataset/test/`):** 75 images (15 per category) completely held out for unbiased evaluation, classification report, and confusion matrix.
-
-### Automated Dataset Downloader & Sanitizer
-The project includes [download_data.py](file:///c:/Users/HP/OneDrive/Desktop/Multi-Class%20Animal%20Image%20Classification/download_data.py) which:
-- Retrieves royalty-free images from Wikimedia Commons for each animal category.
-- Filters out extreme aspect ratio outliers and small icons.
-- Applies perceptual hashing (`dhash`) to prevent duplicate and near-duplicate images.
-
-To refresh or re-download the dataset:
-```bash
-python download_data.py
-```
+1. **Training Set (`dataset/train/`):** 350 images (70 per category) used to train the classification head and fine-tune top convolutional layers.
+2. **Validation Set (`dataset/val/`):** 75 images (15 per category) monitored during training by `EarlyStopping`.
+3. **Testing Set (`dataset/test/`):** 75 images (15 per category) held out strictly for final unbiased evaluation.
 
 ---
 
@@ -77,59 +67,58 @@ pip install -r requirements.txt
 
 ---
 
-## 🧠 Model Architecture & Training Strategy
+## 🧠 Model Architecture & Transfer Learning Strategy
 
-The model is built from scratch without using any pre-trained networks:
 1. **Input Layer:** `(128, 128, 3)`
-2. **Data Augmentation:** In-model `RandomFlip("horizontal")` and `RandomZoom(0.08)` to reduce overfitting.
-3. **Rescaling Layer:** Normalizes pixel intensity values from `[0, 255]` to `[0, 1]`.
-4. **Convolutional Block 1:** `Conv2D(32, 3x3, relu)` + `MaxPooling2D((2, 2))` $\rightarrow$ `(64, 64, 32)`
-5. **Convolutional Block 2:** `Conv2D(64, 3x3, relu)` + `MaxPooling2D((2, 2))` $\rightarrow$ `(32, 32, 64)`
-6. **Convolutional Block 3:** `Conv2D(128, 3x3, relu)` + `MaxPooling2D((2, 2))` $\rightarrow$ `(16, 16, 128)`
-7. **Convolutional Block 4:** `Conv2D(128, 3x3, relu)` + `MaxPooling2D((2, 2))` $\rightarrow$ `(8, 8, 128)`
-8. **Flatten Layer:** 8,192 features.
-9. **Dense Layer:** `Dense(128, activation='relu')`
-10. **Regularization:** `Dropout(0.5)`
-11. **Output Layer:** `Dense(5, activation='softmax')`
-- **Total Parameters:** 1,290,181 (4.92 MB)
+2. **Data Augmentation:** In-model `RandomFlip("horizontal")`, `RandomRotation(0.08)`, and `RandomZoom(0.08)`.
+3. **Rescaling:** Scaled to $[-1, 1]$ via `Rescaling(scale=1./127.5, offset=-1.0)` as expected by MobileNetV2.
+4. **Pretrained Base:** MobileNetV2 pre-trained on ImageNet (excluding classification head).
+   - Base features run in frozen inference mode (`training=False`) to preserve BatchNorm statistics.
+5. **Classification Head:**
+   - `GlobalAveragePooling2D()`
+   - `Dropout(0.3)`
+   - `Dense(128, activation='relu')`
+   - `Dropout(0.3)`
+   - `Dense(5, activation='softmax')`
+6. **Two-Stage Training:**
+   - **Phase 1 (Feature Extraction):** MobileNetV2 base frozen, training classification head with `Adam(lr=0.001)`.
+   - **Phase 2 (Fine-Tuning):** Top 25 layers of MobileNetV2 unfrozen with `Adam(lr=1e-4)` and EarlyStopping.
+- **Total Parameters:** 2,422,597 (9.24 MB)
 
 ---
 
 ## 📈 Final Training & Testing Results
 
-The model was trained with `EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True)`:
-
-- **Best Epoch Restored:** Epoch 17
-- **Training Accuracy:** **69.43%** (Loss: 0.8014)
-- **Validation Accuracy:** **53.33%** (Loss: 1.1684)
-- **Final Independent Test Accuracy:** **32.00%** (Loss: 1.9954)
-  *(Noticeably above the 20.00% random guess baseline for 5 classes on a lightweight scratch CNN)*
+- **Best Epoch Restored:** Epoch 13
+- **Training Accuracy:** **95.43%** (Loss: 0.1708)
+- **Validation Accuracy:** **82.67%** (Loss: 0.5647)
+- **Final Independent Test Accuracy:** **57.33%** (Loss: 1.4828) on 75 unseen samples
 
 ### Classification Report (Independent Test Set: 75 samples)
 
 ```text
               precision    recall  f1-score   support
 
-   Butterfly     0.5000    0.2667    0.3478        15
-         Cat     0.6000    0.6000    0.6000        15
-         Dog     0.1111    0.0667    0.0833        15
-    Elephant     0.2222    0.2667    0.2424        15
-       Horse     0.2400    0.4000    0.3000        15
+   Butterfly     0.8333    0.3333    0.4762        15
+         Cat     0.7333    0.7333    0.7333        15
+         Dog     0.2105    0.2667    0.2353        15
+    Elephant     0.7857    0.7333    0.7586        15
+       Horse     0.5714    0.8000    0.6667        15
 
-    accuracy                         0.3200        75
-   macro avg     0.3347    0.3200    0.3147        75
-weighted avg     0.3347    0.3200    0.3147        75
+    accuracy                         0.5733        75
+   macro avg     0.6269    0.5733    0.5740        75
+weighted avg     0.6269    0.5733    0.5740        75
 ```
 
 ### Confusion Matrix on Test Set
 
 | Actual \ Predicted | Butterfly | Cat | Dog | Elephant | Horse |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Butterfly** | **4** | 1 | 2 | 3 | 5 |
-| **Cat** | 0 | **9** | 1 | 1 | 4 |
-| **Dog** | 3 | 2 | **1** | 5 | 4 |
-| **Elephant** | 1 | 1 | 3 | **4** | 6 |
-| **Horse** | 0 | 2 | 2 | 5 | **6** |
+| **Butterfly** | **5** | 1 | 9 | 0 | 0 |
+| **Cat** | 1 | **11** | 2 | 0 | 1 |
+| **Dog** | 0 | 3 | **4** | 2 | 6 |
+| **Elephant** | 0 | 0 | 2 | **11** | 2 |
+| **Horse** | 0 | 0 | 2 | 1 | **12** |
 
 The generated plots [training_history.png](file:///c:/Users/HP/OneDrive/Desktop/Multi-Class%20Animal%20Image%20Classification/training_history.png) and [confusion_matrix.png](file:///c:/Users/HP/OneDrive/Desktop/Multi-Class%20Animal%20Image%20Classification/confusion_matrix.png) are saved directly in the project directory.
 
@@ -138,11 +127,11 @@ The generated plots [training_history.png](file:///c:/Users/HP/OneDrive/Desktop/
 ## 🚀 Usage Guide
 
 ### 1. Model Training
-To train the CNN model:
+To train the MobileNetV2 model:
 ```bash
 python train.py
 ```
-This automatically outputs training metrics, saves the model checkpoint to `animal_classifier.keras`, updates `class_names.json`, and saves `training_history.png` and `confusion_matrix.png`.
+This runs feature extraction and fine-tuning, saves the model checkpoint to `animal_classifier.keras`, updates `class_names.json`, and saves `training_history.png` and `confusion_matrix.png`.
 
 ### 2. Predict from Command Line
 Test any image with `predict.py`:
@@ -155,14 +144,14 @@ python predict.py "dataset/test/cat/cat_001.jpg"
 Animal Image Prediction Result
 =============================================
 Predicted Animal:    Cat
-Confidence:          60.75%
+Confidence:          99.99%
 
 All Category Confidences:
-  - Cat         : 60.75%
-  - Dog         : 22.39%
-  - Horse       : 8.57%
-  - Butterfly   : 4.15%
-  - Elephant    : 4.14%
+  - Cat         : 99.99%
+  - Butterfly   : 0.01%
+  - Dog         : 0.00%
+  - Elephant    : 0.00%
+  - Horse       : 0.00%
 =============================================
 ```
 
@@ -182,26 +171,11 @@ Open the local URL (`http://localhost:8501`) in your browser to:
 
 ## ☁️ Deployment Guide (Streamlit Community Cloud)
 
-This application is ready for 1-click deployment on **Streamlit Community Cloud**:
-
-### Prerequisites
-1. Push this repository to your GitHub account (instructions below).
-2. Create a free account on [share.streamlit.io](https://share.streamlit.io/) linked to your GitHub.
-
-### Step-by-Step Deployment
-1. Go to [share.streamlit.io](https://share.streamlit.io/) and click **"New app"**.
-2. Select your repository: `<your-username>/Multi-Class-Animal-Image-Classification`.
-3. Set the **Branch** to `main`.
-4. Set the **Main file path** to `app.py`.
-5. Click **"Deploy!"**.
-6. Streamlit Cloud will install dependencies from `requirements.txt`, load `animal_classifier.keras`, and launch the web app at your public URL (e.g. `https://<your-app-name>.streamlit.app`).
-
----
-
-## 🎓 Academic / College Submission Notes
-
-- **Objective:** Demonstrate end-to-end machine learning engineering—from dataset ingestion and deduplication to custom neural network architecture design, regularization, objective evaluation, and cloud deployment.
-- **Model Constraints & Realism:** Rather than using a pre-trained transfer learning network (such as ResNet50 or MobileNetV2 with millions of pre-trained ImageNet parameters), a foundational 4-block CNN was constructed from scratch. Achieving 32% accuracy across 5 classes on an uncurated natural image dataset (where random chance is 20%) realistically demonstrates the capabilities and limitations of training shallow architectures from scratch with limited data.
-- **Future Work:**
-  - Transfer learning / fine-tuning with MobileNetV2 or EfficientNet for high-accuracy production deployment.
-  - Expanding training data to 1,000+ images per class via Kaggle's Animals-10 dataset.
+1. Push this repository to GitHub:
+   ```bash
+   git add .
+   git commit -m "Update to MobileNetV2 Transfer Learning"
+   git push origin main
+   ```
+2. Log into [share.streamlit.io](https://share.streamlit.io/).
+3. Click **"New app"**, select your repository, set the main file path to `app.py`, and click **"Deploy!"**.

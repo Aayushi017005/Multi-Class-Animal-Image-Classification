@@ -1,18 +1,19 @@
 """
-train.py - Upgraded Model Training Script for Multi-Class Animal Image Classification
+train.py - MobileNetV2 Transfer Learning Training Script for Animal Classification
 
-Enhancements:
-1. Strict 3-way dataset separation: Training (350), Validation (75), and Testing (75) sets.
-2. Lightweight, effective in-model Data Augmentation (RandomFlip, subtle RandomZoom).
-3. Improved CNN architecture with 4 progressive Conv2D+MaxPool stages (32->64->128->128),
-   Dropout regularization, and a compact Dense head (~1.1M parameters).
-4. EarlyStopping callback monitoring val_loss with restore_best_weights=True.
-5. Generates:
-   - Final Test Loss & Accuracy
-   - Scikit-learn Classification Report (Precision, Recall, F1-Score)
-   - Confusion Matrix (printed and saved as 'confusion_matrix.png')
-   - Learning curves (saved as 'training_history.png')
-6. Exports updated model ('animal_classifier.keras') and class labels ('class_names.json').
+This script:
+1. Loads strictly separated datasets: Training (350), Validation (75), and Testing (75).
+2. Uses MobileNetV2 pre-trained on ImageNet as a feature extractor.
+3. Adds in-model data augmentation and normalization ([-1, 1]).
+4. Attaches a custom classification head (GlobalAveragePooling2D, Dropout, Dense, Softmax).
+5. Trains the classification head with frozen base weights, followed by optional fine-tuning.
+6. Employs EarlyStopping to preserve the best checkpoint weights.
+7. Generates and saves:
+   - Updated model: 'animal_classifier.keras'
+   - Class mappings: 'class_names.json'
+   - Learning curves: 'training_history.png'
+   - Confusion matrix heatmap: 'confusion_matrix.png'
+   - Scikit-learn Classification Report on unseen test samples
 """
 
 import os
@@ -23,6 +24,7 @@ import numpy as np
 # Suppress minor TF & Matplotlib warnings
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["MPLCONFIGDIR"] = os.path.join(tempfile.gettempdir(), "matplotlib")
+os.environ["KERAS_HOME"] = os.path.abspath(".keras_cache")
 
 import tensorflow as tf
 from tensorflow.keras import layers, models, callbacks
@@ -32,7 +34,10 @@ from sklearn.metrics import classification_report, confusion_matrix
 # Configuration Constants
 IMAGE_SIZE = (128, 128)
 BATCH_SIZE = 16
-EPOCHS = 18
+INITIAL_EPOCHS = 12
+FINE_TUNE_EPOCHS = 8
+TOTAL_EPOCHS = INITIAL_EPOCHS + FINE_TUNE_EPOCHS
+
 TRAIN_DIR = os.path.join("dataset", "train")
 VAL_DIR = os.path.join("dataset", "val")
 TEST_DIR = os.path.join("dataset", "test")
@@ -77,9 +82,9 @@ def load_datasets():
     )
 
     class_names = train_ds.class_names
-    print(f"\nDiscovered {len(class_names)} classes: {class_names}")
+    print(f"\nClasses detected ({len(class_names)}): {class_names}")
 
-    # Optimize data pipeline caching & prefetching
+    # Optimize pipeline with prefetching
     train_ds = train_ds.prefetch(buffer_size=tf.data.AUTOTUNE)
     val_ds = val_ds.prefetch(buffer_size=tf.data.AUTOTUNE)
     test_ds = test_ds.prefetch(buffer_size=tf.data.AUTOTUNE)
@@ -87,49 +92,47 @@ def load_datasets():
     return train_ds, val_ds, test_ds, class_names
 
 
-def build_improved_cnn(input_shape=(128, 128, 3), num_classes=5):
+def build_mobilenetv2_model(input_shape=(128, 128, 3), num_classes=5):
     """
-    Build an improved CNN architecture for animal image classification:
-    - Data Augmentation: Random horizontal flip, subtle zoom
-    - Rescaling: Normalizes pixel values [0, 255] -> [0, 1]
-    - 4 progressive Conv2D+MaxPool blocks (32 -> 64 -> 128 -> 128)
-    - Fully connected classification head with Dropout (0.5) to combat overfitting
-    - Softmax output layer
+    Build Transfer Learning model using pre-trained MobileNetV2.
+    - Data Augmentation (active during fit)
+    - Normalization: scales [0, 255] -> [-1, 1] as expected by MobileNetV2
+    - Pre-trained MobileNetV2 base (ImageNet weights, top removed, initially frozen)
+    - Custom Classification Head: GlobalAveragePooling2D, Dropout, Dense, Softmax
     """
+    # 1. Input layer
+    inputs = layers.Input(shape=input_shape)
+
+    # 2. Data augmentation
     data_augmentation = tf.keras.Sequential([
         layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.08),
         layers.RandomZoom(0.08),
     ], name="data_augmentation")
+    x = data_augmentation(inputs)
 
-    model = models.Sequential([
-        layers.Input(shape=input_shape),
+    # 3. Rescaling for MobileNetV2 (maps [0, 255] to [-1, 1])
+    x = layers.Rescaling(scale=1.0 / 127.5, offset=-1.0)(x)
 
-        # Augmentation & Normalization
-        data_augmentation,
-        layers.Rescaling(1.0 / 255.0),
+    # 4. MobileNetV2 base model
+    base_model = tf.keras.applications.MobileNetV2(
+        input_shape=input_shape,
+        include_top=False,
+        weights="imagenet"
+    )
+    base_model.trainable = False  # Freeze pretrained feature extractor
 
-        # Block 1: 128x128 -> 64x64
-        layers.Conv2D(32, (3, 3), padding="same", activation="relu"),
-        layers.MaxPooling2D(pool_size=(2, 2)),
+    # Run in inference mode so batchnorm statistics are frozen
+    x = base_model(x, training=False)
 
-        # Block 2: 64x64 -> 32x32
-        layers.Conv2D(64, (3, 3), padding="same", activation="relu"),
-        layers.MaxPooling2D(pool_size=(2, 2)),
+    # 5. Classification head
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dropout(0.3)(x)
+    x = layers.Dense(128, activation="relu")(x)
+    x = layers.Dropout(0.3)(x)
+    outputs = layers.Dense(num_classes, activation="softmax")(x)
 
-        # Block 3: 32x32 -> 16x16
-        layers.Conv2D(128, (3, 3), padding="same", activation="relu"),
-        layers.MaxPooling2D(pool_size=(2, 2)),
-
-        # Block 4: 16x16 -> 8x8
-        layers.Conv2D(128, (3, 3), padding="same", activation="relu"),
-        layers.MaxPooling2D(pool_size=(2, 2)),
-
-        # Classification Head (8*8*128 = 8192 features -> 128 -> 5)
-        layers.Flatten(),
-        layers.Dense(128, activation="relu"),
-        layers.Dropout(0.5),
-        layers.Dense(num_classes, activation="softmax")
-    ], name="improved_animal_cnn")
+    model = models.Model(inputs, outputs, name="mobilenetv2_animal_classifier")
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
@@ -137,7 +140,7 @@ def build_improved_cnn(input_shape=(128, 128, 3), num_classes=5):
         metrics=["accuracy"]
     )
 
-    return model
+    return model, base_model
 
 
 def plot_and_save_history(history, save_path=HISTORY_PLOT_PATH):
@@ -154,7 +157,7 @@ def plot_and_save_history(history, save_path=HISTORY_PLOT_PATH):
     plt.subplot(1, 2, 1)
     plt.plot(epochs_range, acc, label="Train Accuracy", marker="o", color="#2E86AB")
     plt.plot(epochs_range, val_acc, label="Val Accuracy", marker="s", color="#A23B72")
-    plt.title("Model Accuracy across Epochs")
+    plt.title("MobileNetV2 Transfer Learning Accuracy")
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy")
     plt.legend(loc="lower right")
@@ -164,7 +167,7 @@ def plot_and_save_history(history, save_path=HISTORY_PLOT_PATH):
     plt.subplot(1, 2, 2)
     plt.plot(epochs_range, loss, label="Train Loss", marker="o", color="#2E86AB")
     plt.plot(epochs_range, val_loss, label="Val Loss", marker="s", color="#F18F01")
-    plt.title("Model Loss across Epochs")
+    plt.title("MobileNetV2 Transfer Learning Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend(loc="upper right")
@@ -180,7 +183,7 @@ def plot_and_save_confusion_matrix(cm, class_names, save_path=CONFUSION_MATRIX_P
     """Render and save confusion matrix heatmap using Matplotlib."""
     plt.figure(figsize=(6, 5))
     plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-    plt.title("Confusion Matrix on Test Set")
+    plt.title("Confusion Matrix (MobileNetV2)")
     plt.colorbar()
 
     tick_marks = np.arange(len(class_names))
@@ -207,7 +210,7 @@ def plot_and_save_confusion_matrix(cm, class_names, save_path=CONFUSION_MATRIX_P
 def evaluate_test_set(model, test_ds, class_names):
     """Run full test evaluation, generating classification report and confusion matrix."""
     print("\n" + "=" * 60)
-    print("Evaluating Model on Independent Test Set")
+    print("Evaluating MobileNetV2 on Independent Test Set")
     print("=" * 60)
 
     test_loss, test_acc = model.evaluate(test_ds, verbose=0)
@@ -247,14 +250,14 @@ def evaluate_test_set(model, test_ds, class_names):
 
 def main():
     print("=" * 60)
-    print("Multi-Class Animal Image Classification - Retraining Pipeline")
+    print("Multi-Class Animal Classification - MobileNetV2 Pipeline")
     print("=" * 60)
 
-    # 1. Load Data with separate Train, Val, Test sets
+    # 1. Load Data
     train_ds, val_ds, test_ds, class_names = load_datasets()
 
-    # 2. Build Improved Model with Data Augmentation
-    model = build_improved_cnn(
+    # 2. Build MobileNetV2 Transfer Learning Model
+    model, base_model = build_mobilenetv2_model(
         input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3),
         num_classes=len(class_names)
     )
@@ -263,22 +266,60 @@ def main():
     # 3. Setup EarlyStopping callback
     early_stopping = callbacks.EarlyStopping(
         monitor="val_loss",
-        patience=6,
+        patience=5,
         restore_best_weights=True,
         verbose=1
     )
 
-    # 4. Train Model using validation set for monitoring
-    print(f"\nStarting model training (up to {EPOCHS} epochs with EarlyStopping)...")
+    # 4. Phase 1: Train Classification Head (Feature Extraction)
+    print(f"\n--- Phase 1: Training Classification Head ({INITIAL_EPOCHS} epochs) ---")
     history = model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=EPOCHS,
+        epochs=INITIAL_EPOCHS,
         callbacks=[early_stopping],
         verbose=1
     )
 
-    # 5. Save updated model and class labels
+    # 5. Phase 2: Fine-Tuning Top Layers of MobileNetV2
+    print("\n--- Phase 2: Fine-Tuning Top Layers of MobileNetV2 ---")
+    base_model.trainable = True
+
+    # Freeze all layers except the last 25 layers
+    fine_tune_at = len(base_model.layers) - 25
+    for layer in base_model.layers[:fine_tune_at]:
+        layer.trainable = False
+
+    print(f"Fine-tuning {len(base_model.layers) - fine_tune_at} layers of MobileNetV2...")
+
+    # Re-compile with lower learning rate for gentle fine-tuning
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    fine_tune_early_stopping = callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=4,
+        restore_best_weights=True,
+        verbose=1
+    )
+
+    history_fine = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=TOTAL_EPOCHS,
+        initial_epoch=len(history.history["loss"]),
+        callbacks=[fine_tune_early_stopping],
+        verbose=1
+    )
+
+    # Merge history
+    for key in history.history:
+        history.history[key].extend(history_fine.history.get(key, []))
+
+    # 6. Save updated model and class labels
     model.save(MODEL_SAVE_PATH)
     print(f"\nUpdated model successfully saved to '{MODEL_SAVE_PATH}'.")
 
@@ -286,13 +327,13 @@ def main():
         json.dump(class_names, f, indent=2)
     print(f"Class names saved to '{LABELS_SAVE_PATH}'.")
 
-    # 6. Save Training History Curves
+    # 7. Save Training History Curves
     plot_and_save_history(history, HISTORY_PLOT_PATH)
 
-    # 7. Evaluate on Independent Test Set
+    # 8. Evaluate on Independent Test Set
     evaluate_test_set(model, test_ds, class_names)
 
-    print("\nRetraining and evaluation workflow completed successfully!")
+    print("\nMobileNetV2 training and evaluation workflow completed successfully!")
 
 
 if __name__ == "__main__":
